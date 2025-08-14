@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Browser TA Scanner – EMA/RSI/MACD (Trend, Swing, Short)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg:#0b0f14; --card:#121822; --text:#e7eef7; --muted:#9fb3c8; --up:#18c683; --dn:#ff5a6a; --accent:#4dabf7; }
+    *{box-sizing:border-box} body{margin:0;font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:var(--text)}
+    header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:14px 16px;background:#0f141c;border-bottom:1px solid #1c2736;position:sticky;top:0;z-index:9}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .card{background:var(--card);border:1px solid #1c2736;border-radius:14px;padding:14px}
+    input,button{border-radius:10px;border:1px solid #243246;background:#0f141c;color:var(--text);padding:10px 12px}
+    button{cursor:pointer}
+    button.primary{background:var(--accent);border-color:transparent;color:#041423;font-weight:600}
+    label{font-size:12px;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:1.2fr .8fr;gap:12px;padding:12px}
+    @media (max-width:1100px){.grid{grid-template-columns:1fr}}
+    #signals b{color:#fff}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid #243246;background:#0f141c;color:var(--muted);font-size:12px}
+    .ok{color:var(--up)} .bad{color:var(--dn)}
+    .legend{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+    .legend .chip{padding:4px 8px;border-radius:8px;background:#0f141c;border:1px solid #243246;font-size:12px}
+    .mt8{margin-top:8px} .mt12{margin-top:12px} .mt16{margin-top:16px}
+    .small{font-size:12px;color:var(--muted)}
+    a{color:#8ecbff;text-decoration:none}
+  </style>
+</head>
+<body>
+<header class="row">
+  <div class="row" style="gap:8px">
+    <strong>TA Scanner</strong>
+    <span class="pill">EMA(9/21/50/200) · RSI(14) · MACD(12/26/9)</span>
+  </div>
+  <div class="row">
+    <input id="apiKey" placeholder="Alpha Vantage API Key (optional)" style="width:270px" />
+    <input id="symbol" placeholder="Symbol e.g. RELIANCE.BSE / INFY.NSE" style="width:260px" />
+    <button class="primary" id="loadBtn">Load</button>
+    <label class="pill">
+      <input id="useAdj" type="checkbox" checked style="accent-color:#4dabf7;transform:translateY(1px);margin-right:6px">Use adjusted close
+    </label>
+    <input type="file" id="csvFile" accept=".csv" />
+  </div>
+</header>
+
+<section class="grid">
+  <div class="card">
+    <canvas id="priceChart" height="220"></canvas>
+    <div class="legend">
+      <span class="chip">Price</span>
+      <span class="chip" style="color:#18c683">EMA 9</span>
+      <span class="chip" style="color:#ffb347">EMA 21</span>
+      <span class="chip" style="color:#7aa2ff">EMA 50</span>
+      <span class="chip" style="color:#f06292">EMA 200</span>
+    </div>
+
+    <div class="mt12">
+      <canvas id="rsiChart" height="110"></canvas>
+    </div>
+
+    <div class="mt12">
+      <canvas id="macdChart" height="130"></canvas>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 6px">Signals & Checklist</h3>
+    <div id="signals" class="small"></div>
+
+    <h3 class="mt16" style="margin:12px 0 6px">Rule Summary</h3>
+    <div class="small">
+      <b>Trend Long</b>: Close &gt; EMA200, EMA9 &gt; EMA21 &gt; EMA50, MACD line &gt; signal, RSI &gt; 52.  
+      <br/>Entry: pullback to EMA21/EMA50 with bullish candle.  
+      <br/>Exit: Close &lt; EMA21 or MACD cross down or RSI &lt; 45.  
+      <br/><br/><b>Trend Short</b>: Close &lt; EMA200, EMA9 &lt; EMA21 &lt; EMA50, MACD line &lt; signal, RSI &lt; 48.  
+      <br/>Entry: bounce into EMA21/EMA50 then bearish candle.  
+      <br/>Exit: Close &gt; EMA21 or MACD cross up or RSI &gt; 55.  
+      <br/><br/><b>Swing Long</b>: RSI cross up 30→35+, MACD histogram rising &gt; prior bar, close &gt; EMA9.  
+      <br/><b>Swing Short</b>: RSI cross down 70→65-, MACD hist falling, close &lt; EMA9.  
+      <br/><br/>Default SL: below/above EMA50 or last swing low/high. Risk ≤ 1%–2% per trade.
+    </div>
+
+    <h3 class="mt16" style="margin:12px 0 6px">Notes</h3>
+    <div class="small">
+      • If the API doesn’t load NSE tickers for your key, export CSV from TradingView (Daily) and click **Upload CSV**.  
+      • Works fully offline once data is loaded.  
+      • Code is client-side only – safe for GitHub Pages.
+    </div>
+  </div>
+</section>
+
+<script>
+/* ========= Utilities ========= */
+const ema = (data, period, accessor=x=>x) => {
+  const k = 2/(period+1), out=[];
+  let emaPrev;
+  for(let i=0;i<data.length;i++){
+    const v = accessor(data[i]);
+    if(i===0){ emaPrev=v; out.push(v); }
+    else{ const e = v*k + emaPrev*(1-k); out.push(e); emaPrev=e; }
+  }
+  return out;
+};
+const sma = (arr, p) => arr.map((_,i)=>{
+  if(i<p-1) return null;
+  let s=0; for(let j=i-p+1;j<=i;j++) s+=arr[j]; return s/p;
+});
+const rsi = (closes, period=14) => {
+  const res = Array(closes.length).fill(null);
+  let gains=0, losses=0;
+  for(let i=1;i<=period;i++){
+    const ch = closes[i]-closes[i-1];
+    gains += Math.max(ch,0);
+    losses += Math.max(-ch,0);
+  }
+  let avgG = gains/period, avgL = losses/period;
+  res[period] = 100 - (100/(1+(avgG/(avgL||1e-9))));
+  for(let i=period+1;i<closes.length;i++){
+    const ch = closes[i]-closes[i-1];
+    avgG = (avgG*(period-1)+Math.max(ch,0))/period;
+    avgL = (avgL*(period-1)+Math.max(-ch,0))/period;
+    res[i] = 100 - (100/(1+(avgG/(avgL||1e-9))));
+  }
+  return res;
+};
+const macd = (closes, fast=12, slow=26, sig=9) => {
+  const emaFast = ema(closes, fast, x=>x);
+  const emaSlow = ema(closes, slow, x=>x);
+  const macdLine = emaFast.map((v,i)=> v - emaSlow[i]);
+  const signal = ema(macdLine, sig, x=>x);
+  const hist = macdLine.map((v,i)=> v - signal[i]);
+  return { macdLine, signal, hist };
+};
+
+function parseCSV(text){
+  // Accept TradingView export (Date,Open,High,Low,Close,Volume)
+  const rows = text.trim().split(/\r?\n/);
+  const header = rows[0].toLowerCase();
+  const out = [];
+  for(let i=1;i<rows.length;i++){
+    const cols = rows[i].split(',');
+    if(cols.length<6) continue;
+    const [date, open, high, low, close, vol] = cols;
+    if(!date || isNaN(+close)) continue;
+    out.push({
+      date: new Date(date),
+      open:+open, high:+high, low:+low, close:+close, volume:+vol
+    });
+  }
+  // ensure ascending by date
+  out.sort((a,b)=> a.date-b.date);
+  return out;
+}
+
+/* ========= Data fetch (Alpha Vantage) ========= */
+async function fetchAlphaDaily(symbol, apiKey, useAdj=true){
+  const f = 'TIME_SERIES_DAILY_ADJUSTED';
+  const url = `https://www.alphavantage.co/query?function=${f}&symbol=${encodeURIComponent(symbol)}&outputsize=full&apikey=${apiKey}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  const key = 'Time Series (Daily)';
+  if(!j[key]) throw new Error(j['Note'] || j['Error Message'] || 'No data from API');
+  const out = Object.entries(j[key]).map(([d, row])=>({
+    date: new Date(d),
+    open: +row['1. open'],
+    high: +row['2. high'],
+    low:  +row['3. low'],
+    close: useAdj ? +row['5. adjusted close'] : +row['4. close'],
+    volume:+row['6. volume']
+  }));
+  out.sort((a,b)=> a.date-b.date);
+  return out;
+}
+
+/* ========= Charts ========= */
+let priceChart, rsiChart, macdChart;
+
+function buildCharts(bars){
+  const labels = bars.map(b=> b.date.toISOString().slice(0,10));
+  const closes = bars.map(b=> b.close);
+
+  const ema9 = ema(bars, 9, b=>b.close);
+  const ema21 = ema(bars, 21, b=>b.close);
+  const ema50 = ema(bars, 50, b=>b.close);
+  const ema200 = ema(bars, 200, b=>b.close);
+  const rsi14 = rsi(closes,14);
+  const {macdLine, signal, hist} = macd(closes,12,26,9);
+
+  // Price + EMAs
+  const ctx1 = document.getElementById('priceChart');
+  priceChart && priceChart.destroy();
+  priceChart = new Chart(ctx1, {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {label:'Close', data:closes, borderColor:'#cdd7e3', pointRadius:0, tension:.2},
+        {label:'EMA 9', data:ema9, borderColor:'#18c683', pointRadius:0, tension:.2},
+        {label:'EMA 21', data:ema21, borderColor:'#ffb347', pointRadius:0, tension:.2},
+        {label:'EMA 50', data:ema50, borderColor:'#7aa2ff', pointRadius:0, tension:.2},
+        {label:'EMA 200', data:ema200, borderColor:'#f06292', pointRadius:0, tension:.2},
+      ]
+    },
+    options:{
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#93a4b7'}},
+        y:{ticks:{color:'#93a4b7'}, grid:{color:'#1c2736'}}
+      }
+    }
+  });
+
+  // RSI
+  const ctx2 = document.getElementById('rsiChart');
+  rsiChart && rsiChart.destroy();
+  rsiChart = new Chart(ctx2, {
+    type:'line',
+    data:{ labels, datasets:[
+      {label:'RSI 14', data:rsi14, borderColor:'#4dabf7', pointRadius:0, tension:.2}
+    ]},
+    options:{
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#93a4b7'}},
+        y:{ticks:{color:'#93a4b7'}, min:0, max:100, grid:{color:'#1c2736'}}
+      },
+      plugins:{annotation:{}} // reserved
+    }
+  });
+
+  // MACD
+  const ctx3 = document.getElementById('macdChart');
+  macdChart && macdChart.destroy();
+  macdChart = new Chart(ctx3, {
+    data:{
+      labels,
+      datasets:[
+        {type:'bar', label:'Hist', data:hist, backgroundColor: hist.map(v=> v>=0 ? 'rgba(24,198,131,.6)':'rgba(255,90,106,.6)')},
+        {type:'line', label:'MACD', data:macdLine, borderColor:'#d0ffea', pointRadius:0, tension:.2},
+        {type:'line', label:'Signal', data:signal, borderColor:'#ffcece', pointRadius:0, tension:.2},
+      ]
+    },
+    options:{
+      plugins:{legend:{display:false}},
+      scales:{ x:{ticks:{color:'#93a4b7'}}, y:{ticks:{color:'#93a4b7'}, grid:{color:'#1c2736'}}}
+    }
+  });
+
+  // Signals panel
+  renderSignals(bars, {ema9, ema21, ema50, ema200, rsi14, macdLine, signal, hist});
+}
+
+/* ========= Signals / Rules ========= */
+function renderSignals(bars, ind){
+  const n = bars.length-1;
+  const c = bars[n].close, h = bars[n].high, l = bars[n].low;
+  const e9=ind.ema9[n], e21=ind.ema21[n], e50=ind.ema50[n], e200=ind.ema200[n];
+  const r = ind.rsi14[n], m = ind.macdLine[n], s = ind.signal[n], hist = ind.hist[n];
+
+  const cond = {
+    above200: c>e200,
+    below200: c<e200,
+    bullishStack: e9>e21 && e21>e50,
+    bearishStack: e9<e21 && e21<e50,
+    macdUp: m>s,
+    macdDn: m<s,
+    rsiBull: r>52,
+    rsiBear: r<48,
+    rsiOversold: r<35,
+    rsiOverbought: r>65,
+    pullbackTo21: c>e200 && c>e50 && c>e21 && (bars[n-1].low<=e21 || bars[n-1].close<=e21),
+    bounceFrom21: c>e21 && bars[n-1].close<e21,
+    rejectFrom21: c<e21 && bars[n-1].close>e21
+  };
+
+  let bullets = [];
+  // Trend long
+  const trendLong = cond.above200 && cond.bullishStack && cond.macdUp && cond.rsiBull;
+  if(trendLong){
+    bullets.push(`✅ <b>Trend Long Bias</b> — above EMA200, EMAs stacked up, MACD↑, RSI=${r.toFixed(1)}`);
+    if(cond.pullbackTo21 || cond.bounceFrom21){
+      bullets.push(`🟢 <b>Entry idea</b>: Pullback/bounce near EMA21/EMA50 with bullish close. SL: below EMA50 or last swing low.`);
+    } else {
+      bullets.push(`ℹ️ Wait for pullback to EMA21/50 OR a bullish range breakout on volume.`);
+    }
+  }
+
+  // Trend short
+  const trendShort = cond.below200 && cond.bearishStack && cond.macdDn && cond.rsiBear;
+  if(trendShort){
+    bullets.push(`❌ <b>Trend Short Bias</b> — below EMA200, EMAs stacked down, MACD↓, RSI=${r.toFixed(1)}`);
+    if(cond.rejectFrom21){
+      bullets.push(`🔴 <b>Entry idea</b>: Rejection at EMA21/EMA50 with bearish close. SL: above EMA50 or last swing high.`);
+    } else {
+      bullets.push(`ℹ️ Wait for bounce into EMA21/50 then bearish candle, or breakdown with volume.`);
+    }
+  }
+
+  // Swing long / short
+  const swingLong = ind.rsi14[n-1]!==null && ind.rsi14[n-1]<35 && r>ind.rsi14[n-1] && ind.hist[n]>ind.hist[n-1] && c>ind.ema9[n];
+  if(swingLong){
+    bullets.push(`🟢 <b>Swing Long</b>: RSI rebound from oversold, MACD hist rising, close > EMA9. Target: EMA21 → EMA50.`);
+  }
+  const swingShort = ind.rsi14[n-1]!==null && ind.rsi14[n-1]>65 && r<ind.rsi14[n-1] && ind.hist[n]<ind.hist[n-1] && c<ind.ema9[n];
+  if(swingShort){
+    bullets.push(`🔴 <b>Swing Short</b>: RSI turning down from overbought, MACD hist falling, close < EMA9. Target: EMA21 → prior support.`);
+  }
+
+  // Neutral if nothing
+  if(!bullets.length){
+    bullets.push(`⚪ <b>Neutral / No high-probability setup now.</b> Watch for: 
+      1) EMA9↔EMA21 cross with volume, 
+      2) RSI crossing 50 line, 
+      3) MACD line crossing signal.`);
+  }
+
+  // Quick checklist
+  const checklist = [
+    checkLine('Close > EMA200', cond.above200),
+    checkLine('EMA9 > EMA21 > EMA50', cond.bullishStack),
+    checkLine('MACD line > signal', cond.macdUp),
+    checkLine('RSI > 52 (bull momentum)', cond.rsiBull),
+    '—',
+    checkLine('Close < EMA200', cond.below200),
+    checkLine('EMA9 < EMA21 < EMA50', cond.bearishStack),
+    checkLine('MACD line < signal', cond.macdDn),
+    checkLine('RSI < 48 (bear momentum)', cond.rsiBear),
+  ].join('<br/>');
+
+  document.getElementById('signals').innerHTML = `
+    <div class="mt8"><b>Last Close:</b> ${c.toFixed(2)} | <b>RSI:</b> ${r?.toFixed(1)} | 
+    <b>MACD:</b> ${(m||0).toFixed(2)} / ${(s||0).toFixed(2)}</div>
+    <div class="mt12">${bullets.map(b=>`<div>${b}</div>`).join('')}</div>
+    <h4 class="mt16" style="margin:12px 0 6px">Checklist</h4>
+    <div class="small">${checklist}</div>
+  `;
+  function checkLine(text, ok){ return `${ok? '✅':'⬜'} ${text}`; }
+}
+
+/* ========= Wire-up ========= */
+const apiKeyEl = document.getElementById('apiKey');
+const symbolEl = document.getElementById('symbol');
+const useAdjEl = document.getElementById('useAdj');
+document.getElementById('loadBtn').onclick = async ()=>{
+  const key = apiKeyEl.value.trim();
+  const sym = symbolEl.value.trim();
+  if(!sym){ alert('Enter a symbol'); return; }
+  try{
+    const bars = await fetchAlphaDaily(sym, key || 'demo', useAdjEl.checked);
+    const daily = resampleDaily(bars); // ensure daily & ascending
+    buildCharts(daily);
+  }catch(e){
+    alert('API load failed: '+e.message+'\nTip: try uploading CSV from TradingView.');
+  }
+};
+document.getElementById('csvFile').addEventListener('change', async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const text = await f.text();
+  const bars = parseCSV(text);
+  if(!bars.length){ alert('Could not parse CSV. Ensure columns: Date,Open,High,Low,Close,Volume'); return; }
+  buildCharts(bars);
+});
+
+function resampleDaily(bars){
+  // Already daily in both Alpha & TV export; just ensure sorted & dedup
+  const map = new Map();
+  bars.forEach(b=> map.set(b.date.toISOString().slice(0,10), b));
+  return Array.from(map.values()).sort((a,b)=> a.date-b.date);
+}
+</script>
+</body>
+</html>
